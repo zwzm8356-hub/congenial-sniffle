@@ -45,7 +45,7 @@ th,td{text-align:right;padding:8px;border-bottom:1px solid var(--bd);white-space
 <script type="module">
 import {initializeApp} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import {getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
-import {initializeFirestore,persistentLocalCache,persistentMultipleTabManager,collection,onSnapshot,writeBatch,doc} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+import {initializeFirestore,persistentLocalCache,persistentMultipleTabManager,collection,onSnapshot,writeBatch,doc,serverTimestamp} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 const cfg={apiKey:"AIzaSyACXQm-gBg0MZY0mGIveAS5WNie_hj2OaU",authDomain:"omar-cf536.firebaseapp.com",projectId:"omar-cf536",storageBucket:"omar-cf536.firebasestorage.app",messagingSenderId:"898179691911",appId:"1:898179691911:web:8b4ea316450bbd31b8cf22"};
 const ADMIN_EMAIL='ziad@gmail.com';
@@ -60,7 +60,7 @@ const fmt=n=>(n/100).toLocaleString('ar-EG',{maximumFractionDigits:2})+' ج';
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const uid=()=>crypto.randomUUID();
 const DESTS=['كاش','فودافون كاش','خط','تحويل بنكي','إنستاباي'];
-const TYPES={collection:'تحصيل',debt:'مديونية',handover:'تسليم لأبو عدي',abuOdayExpense:'مصروف أبو عدي'};
+const TYPES={collection:'تحصيل',debt:'مديونية',handover:'تسليم لأبو عدي',abuReturn:'استرداد من أبو عدي',abuOdayExpense:'مصروف أبو عدي'};
 
 /* ===== محاسبة: كل الأرصدة من القيود ===== */
 const k=e=>e.kind==='reversal'?e.origKind:e.kind;
@@ -74,7 +74,7 @@ function custInfo(id){const a='customer:'+id,es=L.entries.filter(e=>e.account===
 function abu(){const A=e=>e.account==='abuOdayCash';
   const rec=sumF(e=>A(e)&&k(e)==='handover'),sp=sumF(e=>A(e)&&k(e)==='abuOdayExpense'&&e.status==='confirmed',e=>-sg(e)),
   rp=sumF(e=>e.kind==='abuOdayExpense'&&e.status!=='confirmed',e=>e.amount),b=bal('abuOdayCash');
-  const st=b<0?['عجز يحتاج مراجعة','bad']:rp>0?['توجد عمليات معلقة','warn']:b===0?['متزن','']:['يوجد رصيد متبقٍ','warn'];return{rec,sp,rp,b,st}}
+  const st=b<0?['عجز يحتاج مراجعة','bad']:rp>0?['توجد عمليات معلقة','warn']:b===0?['متزن','']:['يوجد رصيد متبقٍ','warn'];const ret=sumF(e=>A(e)&&k(e)==='abuReturn',e=>-sg(e));return{rec,sp,rp,b,st,ret}}
 const dayKey=d=>new Date(d).toLocaleDateString('en-CA');
 
 /* ===== الكتابة (ذرية + منع تكرار بمعرّف العملية) ===== */
@@ -82,11 +82,12 @@ async function post(op){
   if(L.entries.some(e=>e.opId===op.opId))return{ok:true,dup:true};
   if(!Number.isInteger(op.amount)||op.amount<=0)return{ok:false,warn:['المبلغ غير صالح']};
   const w=[],at=new Date().toISOString();
-  const mk=(kind,account,sign,x={})=>({opId:op.opId,kind,account,amount:op.amount,sign,party:op.party||'',status:'confirmed',note:op.note||'',at,by:auth.currentUser.uid,byEmail:auth.currentUser.email,source:op.source||'manual',voiceText:op.voiceText||'',dest:op.dest||'',...x});
+  const mk=(kind,account,sign,x={})=>({opId:op.opId,kind,account,amount:op.amount,sign,party:op.party||'',status:'confirmed',note:op.note||'',at,by:auth.currentUser.uid,byEmail:auth.currentUser.email,source:op.source||'manual',voiceText:op.voiceText||'',dest:op.dest||'',ts:serverTimestamp(),...x});
   let out=[];
   if(op.kind==='debt')out=[mk('debt','customer:'+op.cid,1)];
   else if(op.kind==='collection'){const r=bal('customer:'+op.cid);if(op.amount>r)w.push('المبلغ أكبر من المتبقي على العميل ('+fmt(r)+')');out=[mk('collection','customer:'+op.cid,-1),mk('collection','assistantCash',1)]}
   else if(op.kind==='handover'){const c=bal('assistantCash');if(op.amount>c)w.push('التسليم أكبر من عهدة المساعد المسجلة ('+fmt(c)+')');out=[mk('handover','assistantCash',-1),mk('handover','abuOdayCash',1)]}
+  else if(op.kind==='abuReturn'){const c=bal('abuOdayCash');if(op.amount>c)w.push('الاسترداد أكبر من رصيد خزنة أبو عدي ('+fmt(c)+')');out=[mk('abuReturn','abuOdayCash',-1),mk('abuReturn','assistantCash',1)]}
   else if(op.kind==='abuOdayExpense'){const st=op.status||'confirmed';if(st==='confirmed'&&op.amount>bal('abuOdayCash'))w.push('المصروف أكبر من رصيد خزنة أبو عدي ('+fmt(bal('abuOdayCash'))+')');out=[mk('abuOdayExpense','abuOdayCash',-1,{status:st})]}
   else if(op.kind==='opening')out=[mk('opening',op.account,1)];
   if(w.length&&!op.approved)return{ok:false,warn:w};
@@ -95,13 +96,13 @@ async function post(op){
   if(op.newCust)b.set(doc(db,'customers',op.cid),{name:op.party,phone:op.phone||'',at});
   return commit(b);
 }
-async function commit(b){const p=b.commit();p.catch(e=>alert('فشل الحفظ ويحتاج إعادة المحاولة: '+(e.code||e.message)));
+async function commit(b){const p=b.commit();p.catch(e=>alert('فشل الحفظ ويحتاج إعادة المحاولة: '+(e.code||e.message)+(e.code==='permission-denied'?'\n\nقواعد Firestore لا تسمح بهذه العملية. افتح Firebase ← Firestore Database ← Rules وعدّلها.':'')));
   const r=await Promise.race([p.then(()=>'ok',()=>'fail'),new Promise(r=>setTimeout(()=>r('pending'),4000))]);
   return r==='fail'?{ok:false,warn:['فشل الحفظ']}:{ok:true,pending:r==='pending'}}
 async function reverseOp(opId){if(L.entries.some(e=>e.opId==='rev-'+opId))return;
   const es=L.entries.filter(e=>e.opId===opId);if(!es.length||!confirm('عكس هذه العملية بقيد تصحيحي؟'))return;
   const b=writeBatch(db),at=new Date().toISOString();
-  es.forEach((e,i)=>{const{n,...r}=e;b.set(doc(db,'entries','rev-'+opId+'_'+i),{...r,kind:'reversal',origKind:e.kind,opId:'rev-'+opId,sign:-e.sign,note:'تصحيح',at,by:auth.currentUser.uid,byEmail:auth.currentUser.email,n:i})});
+  es.forEach((e,i)=>{const{n,...r}=e;b.set(doc(db,'entries','rev-'+opId+'_'+i),{...r,kind:'reversal',origKind:e.kind,opId:'rev-'+opId,sign:-e.sign,note:'تصحيح',at,ts:serverTimestamp(),by:auth.currentUser.uid,byEmail:auth.currentUser.email,n:i})});
   await commit(b)}
 window.reverseOp=reverseOp;
 
@@ -119,11 +120,12 @@ function parseAmt(t){t=ND(t.replace(/[أإآ]/g,'ا').replace(/،/g,'')).replace
 function parse(text){text=ND(text.replace(/[أإآ]/g,'ا')).replace(/(\d),(?=\d{3}(?!\d))/g,'$1');
   const segs=text.split(/[،\n]+|[,.](?!\d)|\s(?:و)?(?=خدت|سلمت|صرفت|اديت|استلمت)|\sو(?=\S+\s+(?:خدت|دفع|سلمت|صرف|عليه))/).map(s=>s.trim()).filter(Boolean),out=[];
   for(const s of segs){const n=s,q=s.replace(/ة/g,'ه').replace(/ى/g,'ي');let type=null,person='',m;
-    if(/ابو عدي/.test(q)&&/سلمت|اديت/.test(q)&&!/صرف/.test(q))type='handover';
+    if(/ابو عدي/.test(q)&&/رجع|استرد|(?:خدت|استلمت|اخدت) من/.test(q))type='abuReturn';
+    else if(/ابو عدي/.test(q)&&/سلمت|اديت/.test(q)&&!/صرف/.test(q))type='handover';
     else if(/صرف/.test(q)){type='abuOdayExpense';m=n.match(/\sل\s*([\u0600-\u06FF]+)/)||n.match(/^ل([\u0600-\u06FF]+)/);person=m?m[1]:''}
     else if(/عليه|مديونيه|(?:^|\s)دين(?:\s|$)/.test(q)){type='debt';m=n.match(/^\s*([\u0600-\u06FF]+)\s+عليه/);person=m?m[1]:''}
     else if(/خدت|استلمت|دفع|حصلت|جبت/.test(q)){type='collection';m=n.match(/من\s+([\u0600-\u06FF]+)/)||n.match(/^\s*([\u0600-\u06FF]+)\s+دفع/);person=m?m[1]:''}
-    if(type)out.push({type,person:type==='handover'?'أبو عدي':person,amt:parseAmt(s),id:uid()})}
+    if(type)out.push({type,person:['handover','abuReturn'].includes(type)?'أبو عدي':person,amt:parseAmt(s),id:uid()})}
   return out}
 
 /* ===== الواجهة ===== */
@@ -137,19 +139,19 @@ function assistant(){const td=dayKey(new Date()),T=L.entries.filter(e=>dayKey(e.
   const rev=T.filter(e=>e.n===0&&TYPES[e.kind]).length;
   return `<h1>دفتر الشغل</h1><p class="sub">مرحبًا بك، ماذا تريد أن تسجل اليوم؟</p>
   <button class="mic" onclick="openSheet('voice')">🎙️ سجّل بالصوت</button>
-  <div class="row"><button class="big" onclick="openSheet('collection')">💰 تحصيل من شخص</button><button class="big" onclick="openSheet('handover')">💵 تسليم لأبو عدي</button><button class="big" onclick="openSheet('distribute')">📤 توزيع أبو عدي</button><button class="big" onclick="openSheet('customers')">👥 العملاء</button><button class="big full" onclick="openSheet('today')">📋 حركات اليوم</button></div>
+  <div class="row"><button class="big" onclick="openSheet('collection')">💰 تحصيل من شخص</button><button class="big" onclick="openSheet('handover')">💵 تسليم لأبو عدي</button><button class="big" onclick="openSheet('distribute')">📤 توزيع أبو عدي</button><button class="big" onclick="openSheet('customers')">👥 العملاء</button><button class="big full" onclick="openSheet('abuReturn')">↩️ استرداد من أبو عدي</button><button class="big full" onclick="openSheet('today')">📋 حركات اليوم</button></div>
   <div class="stats"><div class="card"><b>${fmt(col)}</b><span>تحصيل اليوم</span></div><div class="card"><b>${fmt(hand)}</b><span>تسليم اليوم</span></div><div class="card"><b>${rev}</b><span>حركات اليوم</span></div></div>`}
 function admin(){const ci=Object.keys(L.cust).map(i=>({n:L.cust[i],p:L.ph[i]||'',id:i,...custInfo(i)})).sort((a,b)=>b.rem-a.rem),A=abu();
   const totDebt=ci.reduce((s,c)=>s+c.debt,0),totRem=ci.reduce((s,c)=>s+c.rem,0),today=dayKey(new Date());
   const colDay=L.entries.filter(e=>e.account==='assistantCash'&&k(e)==='collection'&&dayKey(e.at)===today).reduce((s,e)=>s+sg(e),0);
   const acct=a=>a.startsWith('customer:')?(L.cust[a.slice(9)]||'عميل'):a==='assistantCash'?'عهدة أخي':'خزنة أبو عدي';
-  const rows=L.entries.slice().reverse().map(e=>`<tr><td>${new Date(e.at).toLocaleString('ar-EG')}</td><td>${e.kind==='reversal'?'قيد عكسي':(TYPES[e.kind]||(e.kind==='opening'?'رصيد افتتاحي':e.kind))}</td><td>${esc(acct(e.account))}</td><td>${esc(e.party)}</td><td>${esc(e.dest)}</td><td class="${e.sign>0?'pos':'neg'}">${e.sign>0?'+':'−'}${fmt(e.amount)}</td><td>${e.status==='confirmed'?'مؤكد':'مُبلَّغ'}</td><td>${e.source==='voice'?'🎙️':'يدوي'}</td><td>${e.n===0&&e.kind!=='reversal'&&!L.entries.some(x=>x.opId==='rev-'+e.opId)?`<button class="btn x" onclick="reverseOp('${e.opId}')">عكس</button>`:''}${e.n===0?`<button class="btn x" onclick="delOp('${e.opId}')">🗑 حذف</button>`:''}</td></tr>`).join('');
+  const rows=L.entries.slice().reverse().map(e=>`<tr><td>${e.n===0&&e.kind!=='reversal'&&!L.entries.some(x=>x.opId==='rev-'+e.opId)?`<button class="btn x" onclick="reverseOp('${e.opId}')">عكس</button>`:''}${e.n===0?`<button class="btn x" onclick="delOp('${e.opId}')">🗑 حذف</button>`:''}</td><td>${new Date(e.at).toLocaleString('ar-EG')}</td><td>${e.kind==='reversal'?'قيد عكسي':(TYPES[e.kind]||(e.kind==='opening'?'رصيد افتتاحي':e.kind))}</td><td>${esc(acct(e.account))}</td><td>${esc(e.party)}</td><td>${esc(e.dest)}</td><td class="${e.sign>0?'pos':'neg'}">${e.sign>0?'+':'−'}${fmt(e.amount)}</td><td>${e.status==='confirmed'?'مؤكد':'مُبلَّغ'}</td><td>${e.source==='voice'?'🎙️':'يدوي'}</td></tr>`).join('');
   return `<h1>لوحة المدير</h1><div class="grid">
-  <div class="card"><b>${fmt(colDay)}</b><span>تحصيل اليوم</span></div><div class="card"><b>${fmt(totDebt)}</b><span>إجمالي المديونيات</span></div><div class="card"><b>${fmt(totRem)}</b><span>المتبقي على العملاء</span></div><div class="card"><b>${fmt(bal('assistantCash'))}</b><span>عهدة أخي</span></div><div class="card"><b>${fmt(A.rec)}</b><span>سُلِّم لأبو عدي</span></div><div class="card"><b>${fmt(A.sp)}</b><span>مصروف مؤكد</span></div><div class="card"><b class="${A.b<0?'neg':''}">${fmt(A.b)}</b><span>رصيد أبو عدي <span class="pill ${A.st[1]}">${A.st[0]}</span></span></div></div>
+  <div class="card"><b>${fmt(colDay)}</b><span>تحصيل اليوم</span></div><div class="card"><b>${fmt(totDebt)}</b><span>إجمالي المديونيات</span></div><div class="card"><b>${fmt(totRem)}</b><span>المتبقي على العملاء</span></div><div class="card"><b>${fmt(bal('assistantCash'))}</b><span>عهدة أخي</span></div><div class="card"><b>${fmt(A.rec)}</b><span>سُلِّم لأبو عدي</span></div><div class="card"><b>${fmt(A.sp)}</b><span>مصروف مؤكد</span></div><div class="card"><b>${fmt(A.ret)}</b><span>مُسترد من أبو عدي</span></div><div class="card"><b class="${A.b<0?'neg':''}">${fmt(A.b)}</b><span>رصيد أبو عدي <span class="pill ${A.st[1]}">${A.st[0]}</span></span></div></div>
   ${A.rp>0?`<div class="msg">مصروفات مُبلَّغ عنها وغير مؤكدة: ${fmt(A.rp)}</div>`:''}
   <button class="btn" onclick="openSheet('bulkcust')">➕ إضافة عملاء ومديونياتهم</button> <button class="btn sec" onclick="openSheet('opening')">رصيد افتتاحي للعهدة/الخزنة</button> <button class="btn sec" onclick="exportCSV()">⬇️ تصدير نسخة (Excel)</button> <button class="btn x" onclick="delAll()">🗑 مسح كل البيانات</button>
   ${abuStmt()}<h2>العملاء</h2><div class="tblw"><table><tr><th>العميل</th><th>الهاتف</th><th>المديونية</th><th>المدفوع</th><th>المتبقي</th><th></th></tr>${ci.map(c=>`<tr><td>${esc(c.n)}</td><td>${esc(c.p)}</td><td>${fmt(c.debt)}</td><td>${fmt(c.paid)}</td><td><b>${fmt(c.rem)}</b></td><td><button class="btn x" onclick="delCust('${c.id}')">🗑 حذف</button></td></tr>`).join('')||'<tr><td colspan="6" class="note">لا يوجد عملاء بعد</td></tr>'}</table></div>
-  <h2>سجل جميع الحركات</h2><div class="tblw"><table><tr><th>الوقت</th><th>النوع</th><th>الحساب</th><th>الطرف</th><th>الوجهة</th><th>المبلغ</th><th>الحالة</th><th>المصدر</th><th></th></tr>${rows||'<tr><td colspan="9" class="note">لا توجد حركات</td></tr>'}</table></div>
+  <h2>سجل جميع الحركات</h2><div class="tblw"><table><tr><th></th><th>الوقت</th><th>النوع</th><th>الحساب</th><th>الطرف</th><th>الوجهة</th><th>المبلغ</th><th>الحالة</th><th>المصدر</th></tr>${rows||'<tr><td colspan="9" class="note">لا توجد حركات</td></tr>'}</table></div>
   ${delLog()}<p class="note">«عكس» يلغي الأثر ويُبقي الأصل ظاهرًا، و«حذف» يمسح نهائيًا بلا رجوع.</p>`}
 function sheet(){let b='';
   if(S.sheet==='today'){const td=dayKey(new Date()),me=auth.currentUser.uid,t=L.entries.filter(e=>dayKey(e.at)===td&&e.n===0&&TYPES[e.kind]).reverse();
@@ -158,10 +160,10 @@ function sheet(){let b='';
   else if(S.sheet==='bulkcust'){b=!S.bulk?`<h2>إضافة عملاء ومديونياتهم</h2><p class="note">اكتب كل شخص في سطر: الاسم ثم المبلغ المتبقي عليه (ورقم الهاتف اختياري).<br>مثال:<br>أحمد سمير 20000<br>محمد علي 5000 01012345678<br>محمود 0</p><textarea id="bc" rows="8"></textarea><br><br><button class="btn" onclick="bulkParse()">راجع</button> <button class="btn sec" onclick="closeSheet()">إلغاء</button>`:`<h2>راجع قبل الحفظ</h2>${S.bulk.map(r=>`<div class="card" style="margin:6px 0;display:flex;justify-content:space-between"><span>${esc(r.name)} <span class="note">${esc(r.ph)}</span></span><b>${fmt(r.amt)}</b></div>`).join('')}<p class="note">الإجمالي: ${fmt(S.bulk.reduce((s,r)=>s+r.amt,0))}</p><button class="btn" onclick="bulkSave()">حفظ الكل</button> <button class="btn sec" onclick="S.bulk=null;render()">رجوع</button>`}
   else if(S.sheet==='opening'){b=`<h2>رصيد افتتاحي</h2><select id="oa"><option value="assistantCash">عهدة أخي</option><option value="abuOdayCash">خزنة أبو عدي</option></select><br><br><input id="ov" type="number" inputmode="decimal" placeholder="المبلغ بالجنيه"><br><br><button class="btn" onclick="doOpening()">حفظ</button> <button class="btn sec" onclick="closeSheet()">إلغاء</button>`}
   else{const voice=S.sheet==='voice'&&!S.draft.length;
-    b=`<h2>${S.sheet==='voice'?'سجّل بالصوت':S.sheet==='collection'?'تحصيل جديد':S.sheet==='distribute'?'توزيع أبو عدي (سطر لكل شخص)':'تسليم لأبو عدي'}</h2>`+(voice?`${S.msg?`<div class="msg">${S.msg}</div>`:''}<button class="mic" style="padding:20px;font-size:20px" onclick="rec()">${S.rec?'⏹️ إيقاف':'🎙️ اضغط وتكلم'}</button><textarea id="tx" rows="4" placeholder="أو اكتب: خدت من أحمد 10 آلاف، وسلمت أبو عدي 5000">${esc(S.text)}</textarea><p class="note">لا يُحفظ شيء قبل تأكيدك.</p><button class="btn" onclick="analyze()">حلّل</button> <button class="btn sec" onclick="closeSheet()">إلغاء</button>`:
-    `${S.msg?`<div class="msg">${S.msg}</div>`:''}<p class="note">مراجعة قبل الحفظ</p>${S.draft.map((d,i)=>`<div class="item">${nameField(d,i)}<select onchange="S.draft[${i}].type=this.value;render()">${Object.entries(TYPES).map(([x,v])=>`<option value="${x}" ${x===d.type?'selected':''}>${v}</option>`).join('')}</select><input type="number" inputmode="decimal" value="${d.amt!=null?d.amt/100:''}" placeholder="المبلغ" onchange="S.draft[${i}].amt=Math.round(this.value*100)||null"><button class="btn x" onclick="S.draft.splice(${i},1);render()">✕</button></div>${d.type==='abuOdayExpense'?`<input list="dl" value="${esc(d.dest||'')}" placeholder="فين راحت الفلوس؟ (كاش / خط / محفظة...)" onchange="S.draft[${i}].dest=this.value.trim()">`:''}${d.amt==null?'<div class="note neg">لم أفهم المبلغ، اكتبه من فضلك</div>':''}${!d.person&&d.type!=='handover'?'<div class="note neg">مين الشخص؟</div>':''}${d.hint?'<div class="note neg">'+d.hint+'</div>':''}`).join('')}<datalist id="dl">${DESTS.map(x=>`<option value="${x}">`).join('')}</datalist><p class="note">الإجمالي: ${fmt(S.draft.filter(d=>d.amt).reduce((s,d)=>s+d.amt,0))}</p><button class="btn sec" onclick="addRow()">+ إضافة سطر</button><br><br><button class="btn" onclick="confirmDraft()">تأكيد الكل</button> <button class="btn sec" onclick="closeSheet()">إلغاء</button>`)}
+    b=`<h2>${S.sheet==='voice'?'سجّل بالصوت':S.sheet==='collection'?'تحصيل جديد':S.sheet==='distribute'?'توزيع أبو عدي (سطر لكل شخص)':S.sheet==='abuReturn'?'استرداد من أبو عدي':'تسليم لأبو عدي'}</h2>`+(voice?`${S.msg?`<div class="msg">${S.msg}</div>`:''}<button class="mic" style="padding:20px;font-size:20px" onclick="rec()">${S.rec?'⏹️ إيقاف':'🎙️ اضغط وتكلم'}</button><textarea id="tx" rows="4" placeholder="أو اكتب: خدت من أحمد 10 آلاف، وسلمت أبو عدي 5000">${esc(S.text)}</textarea><p class="note">لا يُحفظ شيء قبل تأكيدك.</p><button class="btn" onclick="analyze()">حلّل</button> <button class="btn sec" onclick="closeSheet()">إلغاء</button>`:
+    `${S.msg?`<div class="msg">${S.msg}</div>`:''}<p class="note">مراجعة قبل الحفظ</p>${S.draft.map((d,i)=>`<div class="item">${nameField(d,i)}<select onchange="S.draft[${i}].type=this.value;render()">${Object.entries(TYPES).map(([x,v])=>`<option value="${x}" ${x===d.type?'selected':''}>${v}</option>`).join('')}</select><input type="number" inputmode="decimal" value="${d.amt!=null?d.amt/100:''}" placeholder="المبلغ" onchange="S.draft[${i}].amt=Math.round(this.value*100)||null"><button class="btn x" onclick="S.draft.splice(${i},1);render()">✕</button></div>${d.type==='abuOdayExpense'?`<input list="dl" value="${esc(d.dest||'')}" placeholder="فين راحت الفلوس؟ (كاش / خط / محفظة...)" onchange="S.draft[${i}].dest=this.value.trim()">`:''}${d.amt==null?'<div class="note neg">لم أفهم المبلغ، اكتبه من فضلك</div>':''}${!d.person&&!['handover','abuReturn'].includes(d.type)?'<div class="note neg">مين الشخص؟</div>':''}${d.hint?'<div class="note neg">'+d.hint+'</div>':''}`).join('')}<datalist id="dl">${DESTS.map(x=>`<option value="${x}">`).join('')}</datalist><p class="note">الإجمالي: ${fmt(S.draft.filter(d=>d.amt).reduce((s,d)=>s+d.amt,0))}</p><button class="btn sec" onclick="addRow()">+ إضافة سطر</button><br><br><button class="btn" onclick="confirmDraft()">تأكيد الكل</button> <button class="btn sec" onclick="closeSheet()">إلغاء</button>`)}
   return `<div class="sheet" onclick="if(event.target===this)closeSheet()"><div>${b}</div></div>`}
-window.openSheet=kd=>{S.sheet=kd;S.msg='';S.text='';S.draft=kd==='collection'?[{type:'collection',person:'',amt:null,id:uid()}]:kd==='handover'?[{type:'handover',person:'أبو عدي',amt:null,id:uid()}]:kd==='distribute'?[{type:'abuOdayExpense',person:'',amt:null,dest:'كاش',id:uid()}]:[];S.bulk=null;S.q='';render()};
+window.openSheet=kd=>{S.sheet=kd;S.msg='';S.text='';S.draft=kd==='collection'?[{type:'collection',person:'',amt:null,id:uid()}]:kd==='handover'?[{type:'handover',person:'أبو عدي',amt:null,id:uid()}]:kd==='abuReturn'?[{type:'abuReturn',person:'أبو عدي',amt:null,id:uid()}]:kd==='distribute'?[{type:'abuOdayExpense',person:'',amt:null,dest:'كاش',id:uid()}]:[];S.bulk=null;S.q='';render()};
 window.closeSheet=()=>{if(S.rec){S.rec.stop();S.rec=null}S.sheet=null;S.draft=[];S.text='';S.bulk=null;render()};
 window.analyze=()=>{S.text=document.getElementById('tx').value;S.draft=parse(S.text).map(autoMatch);S.msg=S.draft.length?'تم التعرف على العمليات التالية:':'لم أفهم أي عملية، جرّب صياغة أوضح.';render()};
 window.rec=()=>{const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){alert('المتصفح لا يدعم التعرف على الصوت، اكتب الكلام في المربع.');return}
@@ -170,11 +172,21 @@ window.rec=()=>{const SR=window.SpeechRecognition||window.webkitSpeechRecognitio
   r.onend=()=>{const el=document.getElementById('tx');S.text=el?el.value:S.text;S.rec=null;if(S.sheet==='voice'&&!S.draft.length)render()};
   r.start();S.rec=r;render()};
 const NC={};
+function bulkCust(r){if(!r.cid){if(Object.values(L.cust).includes(r.name)&&confirm('«'+r.name+'» موجود بالفعل.\nموافق = عميل جديد منفصل بنفس الاسم\nإلغاء = إضافة المبلغ على العميل الموجود')){r.cid='c'+uid().slice(0,12);r.cnew=true}
+  else{const c=custId(r.name);r.cid=c.id;r.cnew=c.isNew}}
+  return{id:r.cid,isNew:r.cnew}}
 function custId(name){for(const[i,n]of Object.entries(L.cust))if(n===name)return{id:i,isNew:false};if(!NC[name])NC[name]='c'+uid().slice(0,12);return{id:NC[name],isNew:true}}
-window.confirmDraft=async()=>{const bad=S.draft.find(d=>d.amt==null||(!d.person&&d.type!=='handover'));if(bad){S.msg='أكمل الاسم والمبلغ أولًا.';render();return}
+window.confirmDraft=async()=>{const bad=S.draft.find(d=>d.amt==null||(!d.person&&!['handover','abuReturn'].includes(d.type)));if(bad){S.msg='أكمل الاسم والمبلغ أولًا.';render();return}
+  const amb=S.draft.find(d=>(d.type==='collection'||d.type==='debt')&&!d.cid&&!d.forceNew&&Object.values(L.cust).filter(n=>n===d.person).length>1);
+  if(amb){S.msg='في أكثر من عميل بنفس الاسم «'+amb.person+'»، اختر العميل الصحيح من القائمة.';amb.person='';amb.newMode=false;render();return}
+  for(const d of S.draft)if((d.type==='collection'||d.type==='debt')&&!d.cid&&d.newMode&&d.fn===undefined&&Object.values(L.cust).includes(d.person)){d.fn=1;d.forceNew=confirm('في عميل بنفس الاسم «'+d.person+'».\nموافق = عميل جديد منفصل\nإلغاء = نفس العميل الموجود')}
   const src=S.text?'voice':'manual',failed=[];let pend=false;
-  for(const d of S.draft){const op={opId:d.id,dest:d.dest||'',amount:d.amt,source:src,voiceText:S.text,party:d.person,kind:d.type};
-    if(d.type==='collection'||d.type==='debt'){const c=custId(d.person);op.cid=c.id;op.newCust=c.isNew}
+  for(const d of S.draft){const op={opId:d.id,dest:d.dest||'',amount:d.amt,source:src,voiceText:S.text,party:['handover','abuReturn'].includes(d.type)?'أبو عدي':d.person,kind:d.type};
+    if(d.type==='collection'||d.type==='debt'){let c;
+      if(d.cid&&L.cust[d.cid])c={id:d.cid,isNew:false};
+      else if(d.forceNew)c={id:d.nid||(d.nid='c'+uid().slice(0,12)),isNew:true};
+      else c=custId(d.person);
+      op.cid=c.id;op.newCust=c.isNew}
     let r=await post(op);
     if(!r.ok&&r.warn&&r.warn[0]!=='فشل الحفظ'&&r.warn[0]!=='المبلغ غير صالح'){if(confirm('تنبيه: '+r.warn.join('، ')+'\nهل تريد المتابعة وتسجيلها بموافقتك؟')){op.approved=true;r=await post(op)}else{failed.push(d);continue}}
     if(!r.ok)failed.push(d);else if(r.pending)pend=true}
@@ -190,7 +202,7 @@ window.searchC=v=>{S.q=v;document.getElementById('cl').innerHTML=custList()};
 window.bulkParse=()=>{const rows=[];document.getElementById('bc').value.split('\n').forEach(l=>{l=ND(l.trim());if(!l)return;let ph='';const pm=l.match(/01\d{9}/);if(pm){ph=pm[0];l=l.replace(pm[0],'').trim()}
   const m=l.match(/^(.*?)[\s\-–:,،]*(\d[\d,.]*)\s*(ألف|الف|آلاف|الاف)?\s*$/);const name=(m?m[1]:l).trim();let amt=m?Math.round(parseFloat(m[2].replace(/,/g,''))*(m[3]?1000:1)*100):0;if(!(amt>0))amt=0;if(name)rows.push({name,amt,ph,id:uid()})});
   if(!rows.length){alert('اكتب شخصًا واحدًا على الأقل');return}S.bulk=rows;render()};
-window.bulkSave=async()=>{let pend=false;for(const r of S.bulk){const c=custId(r.name);
+window.bulkSave=async()=>{let pend=false;for(const r of S.bulk){const c=bulkCust(r);
   if(r.amt>0){const x=await post({opId:r.id,kind:'opening',account:'customer:'+c.id,amount:r.amt,party:r.name,cid:c.id,newCust:c.isNew,phone:r.ph});if(!x.ok){alert('تعذّر حفظ '+r.name);return}if(x.pending)pend=true}
   else if(c.isNew){const b=writeBatch(db);b.set(doc(db,'customers',c.id),{name:r.name,phone:r.ph,at:new Date().toISOString()});const x=await commit(b);if(x.pending)pend=true}}
   S.bulk=null;S.sheet=null;alert(pend?'محفوظ على الجهاز ⏳ وفي انتظار المزامنة':'تم حفظ العملاء ✅');render()};
@@ -213,8 +225,10 @@ window.delOp=async opId=>{const es=L.entries.filter(e=>e.opId===opId||e.opId==='
   if(!confirm('حذف هذه العملية نهائيًا من الدفتر؟ لا يمكن التراجع.'))return;
   const f=es.find(e=>e.n===0&&e.kind!=='reversal')||es[0],b=writeBatch(db);
   es.forEach(e=>b.delete(entRef(e)));
-  b.set(doc(db,'deletions',uid()),{opId,kind:f.kind,amount:f.amount,party:f.party||'',dest:f.dest||'',by:me,byEmail:auth.currentUser.email,at:new Date().toISOString(),entryAt:f.at});
-  await commit(b);render()};
+  const x=await commit(b);
+  if(x.ok){alert(x.pending?'محفوظ على الجهاز ⏳ وفي انتظار المزامنة':'تم الحذف ✅');
+    const lb=writeBatch(db);lb.set(doc(db,'deletions',uid()),{opId,kind:f.kind,amount:f.amount,party:f.party||'',dest:f.dest||'',by:me,byEmail:auth.currentUser.email,at:new Date().toISOString(),entryAt:f.at||''});lb.commit().catch(()=>{})}
+  render()};
 window.delCust=async id=>{const a='customer:'+id,ops=new Set();
   if(L.entries.some(e=>e.account===a&&k(e)==='collection')){alert('هذا العميل عليه تحصيلات مسجلة، وحذفه هيمسح قيود عهدة المساعد المرتبطة بها ويبوّظ الأرصدة.\nاحذف عمليات التحصيل الخاصة به أولًا من «سجل جميع الحركات»، أو استخدم «مسح كل البيانات» لو دي بيانات تجريبية.');return}
   L.entries.filter(e=>e.account===a).forEach(e=>{ops.add(e.opId);ops.add('rev-'+e.opId);if(e.opId.startsWith('rev-'))ops.add(e.opId.slice(4))});
@@ -229,20 +243,20 @@ window.delAll=async()=>{if(!confirm('سيتم تنزيل نسخة احتياطي
 
 window.nameField=(d,i)=>{
   if(d.type==='collection'||d.type==='debt'){
-    const list=Object.entries(L.cust).map(([id,n])=>({n,rem:custInfo(id).rem})).filter(c=>d.type==='debt'||c.rem>0).sort((a,b)=>b.rem-a.rem);
-    const known=list.some(c=>c.n===d.person);
+    const list=Object.entries(L.cust).map(([id,n])=>({id,n,ph:L.ph[id]||'',rem:custInfo(id).rem})).filter(c=>d.type==='debt'||c.rem>0||c.id===d.cid).sort((a,b)=>b.rem-a.rem);
+    const known=d.cid&&L.cust[d.cid];
     if(!d.newMode&&(known||!d.person)&&list.length)
-      return `<select onchange="pickName(${i},this.value)"><option value="">اختر من العملاء</option>${list.map(c=>`<option value="${esc(c.n)}" ${c.n===d.person?'selected':''}>${esc(c.n)} — متبقي ${fmt(c.rem)}</option>`).join('')}<option value="__new">➕ شخص جديد</option></select>`;
+      return `<select onchange="pickName(${i},this.value)"><option value="">اختر من العملاء</option>${list.map(c=>`<option value="${c.id}" ${c.id===d.cid?'selected':''}>${esc(c.n)}${c.ph?' · '+esc(c.ph):''} — متبقي ${fmt(c.rem)}</option>`).join('')}<option value="__new">➕ شخص جديد</option></select>`;
   }
-  return `<input value="${esc(d.person)}" placeholder="الاسم" onchange="S.draft[${i}].person=this.value.trim()">`};
-window.pickName=(i,v)=>{if(v==='__new'){S.draft[i].person='';S.draft[i].newMode=true}else{S.draft[i].person=v;S.draft[i].newMode=false}S.draft[i].hint='';render()};
-window.autoMatch=d=>{if((d.type==='collection'||d.type==='debt')&&d.person){const names=Object.values(L.cust);
-  if(!names.includes(d.person)){const c=names.filter(n=>n.split(' ')[0]===d.person||n.startsWith(d.person));
-    if(c.length===1)d.person=c[0];else if(c.length>1){d.person='';d.hint='في أكثر من شخص بنفس الاسم، اختر الصحيح'}}}return d};
+  return `<input value="${esc(d.person)}" placeholder="الاسم" onchange="S.draft[${i}].person=this.value.trim();S.draft[${i}].cid=''">`};
+window.pickName=(i,v)=>{const d=S.draft[i];if(v==='__new'){d.person='';d.cid='';d.newMode=true}else if(v){d.cid=v;d.person=L.cust[v]||'';d.newMode=false}else{d.cid='';d.person=''}d.hint='';render()};
+window.autoMatch=d=>{if((d.type==='collection'||d.type==='debt')&&d.person){const es=Object.entries(L.cust);
+  let c=es.filter(([i,n])=>n===d.person);if(!c.length)c=es.filter(([i,n])=>n.split(' ')[0]===d.person||n.startsWith(d.person));
+  if(c.length===1){d.person=c[0][1];d.cid=c[0][0]}else if(c.length>1){d.person='';d.hint='في أكثر من شخص بنفس الاسم، اختر الصحيح'}}return d};
 
 window.delLog=()=>L.del.length?`<h2>آخر العمليات المحذوفة</h2><div class="tblw"><table><tr><th>وقت الحذف</th><th>النوع</th><th>الطرف</th><th>المبلغ</th><th>حذفها</th></tr>${L.del.slice(0,30).map(d=>`<tr><td>${new Date(d.at).toLocaleString('ar-EG')}</td><td>${esc(({customer:'حذف عميل',all:'مسح كل البيانات'})[d.kind]||TYPES[d.kind]||d.kind)}</td><td>${esc(d.party)}</td><td>${fmt(d.amount)}</td><td>${d.byEmail===ADMIN_EMAIL?'المدير':'المساعد'}</td></tr>`).join('')}</table></div>`:'';
 onAuthStateChanged(auth,u=>{unsubs.forEach(f=>f());unsubs=[];L.entries=[];L.cust={};L.ph={};L.del=[];L.ready=false;S.err='';S.user=u;S.role=u?(u.email===ADMIN_EMAIL?'admin':'assistant'):null;S.view='assistant';
-  if(u){unsubs.push(onSnapshot(collection(db,'entries'),{includeMetadataChanges:true},s=>{L.entries=s.docs.map(d=>d.data()).sort((a,b)=>a.at<b.at?-1:a.at>b.at?1:(a.n||0)-(b.n||0));L.ready=true;S.err='';L.pending=s.metadata.hasPendingWrites;L.cache=s.metadata.fromCache;if(!S.sheet)render()},e=>{S.err='لا توجد صلاحية قراءة أو تعذّر التحميل: '+e.code;render()}));
+  if(u){unsubs.push(onSnapshot(collection(db,'entries'),{includeMetadataChanges:true},s=>{L.entries=s.docs.map(d=>{const x=d.data({serverTimestamps:'estimate'});if(x.ts&&x.ts.toDate)x.at=x.ts.toDate().toISOString();delete x.ts;return x}).sort((a,b)=>a.at<b.at?-1:a.at>b.at?1:(a.n||0)-(b.n||0));L.ready=true;S.err='';L.pending=s.metadata.hasPendingWrites;L.cache=s.metadata.fromCache;if(!S.sheet)render()},e=>{S.err='لا توجد صلاحية قراءة أو تعذّر التحميل: '+e.code;render()}));
     unsubs.push(onSnapshot(collection(db,'customers'),s=>{L.cust={};L.ph={};s.docs.forEach(d=>{L.cust[d.id]=d.data().name;L.ph[d.id]=d.data().phone||''});if(!S.sheet)render()},e=>{S.err='تعذّر تحميل العملاء: '+e.code;render()}))
     if(S.role==='admin')unsubs.push(onSnapshot(collection(db,'deletions'),s=>{L.del=s.docs.map(d=>d.data()).sort((a,b)=>a.at<b.at?1:-1);if(!S.sheet)render()}))}
   render()});
